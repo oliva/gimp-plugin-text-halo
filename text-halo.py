@@ -8,7 +8,6 @@ from gi.repository import GObject
 from gi.repository import GLib
 import sys
 
-
 '''
 A Python plugin to add halo behind a (text) layer.
 '''
@@ -31,10 +30,8 @@ def text_halo(procedure, run_mode, image, n_drawables, drawables, args, data):
 		else:
 			dialog.destroy()
 
-	sigma = config.get_property('sigma')
-	level_min = config.get_property('level_min')
-	level_gamma = config.get_property('level_gamma')
-	level_max = config.get_property('level_max')
+	size = config.get_property('size')
+	strength = config.get_property('strength')
 	layers = image.list_selected_layers()
 
 	Gimp.context_push()
@@ -56,7 +53,12 @@ def text_halo(procedure, run_mode, image, n_drawables, drawables, args, data):
 	# Compress actions to one undo event
 	image.undo_group_start()
 
+	errors = list()
+
 	for layer in layers:
+		if not isinstance(layer, Gimp.TextLayer):
+			errors.append(layer.get_name())
+			continue
 		# Select current layer so insert is placed correctly
 		image.set_selected_layers([layer])
 		name = layer.get_name()
@@ -82,44 +84,47 @@ def text_halo(procedure, run_mode, image, n_drawables, drawables, args, data):
 		# Add mask from alpha
 		mask = halo.create_mask(Gimp.AddMaskType.ALPHA_TRANSFER)
 		halo.add_mask(mask)
-		# Invert image
-		halo.invert(linear=False) # TODO optionally get a color and fill
+		# Fill with text color, then invert
+		_, color = layer.get_color()
+		Gimp.context_set_foreground(color)
+		halo.fill(Gimp.FillType.FOREGROUND)
+		halo.invert(linear=False)
 		# Blur mask
-		pdb.run_procedure('plug-in-gauss', [Gimp.RunMode.NONINTERACTIVE, image, mask, sigma, sigma, 0])
+		font_size, _ = layer.get_font_size()
+		size *= font_size
+		pdb.run_procedure('plug-in-gauss-iir', [Gimp.RunMode.NONINTERACTIVE, image, mask, size, True, True])
 		# Correct levels on mask
-		pdb.run_procedure('gimp-drawable-levels', [mask, Gimp.HistogramChannel.VALUE, level_min, level_max, False, level_gamma, 0.0, 1.0, False])
+		level_min = 0.047
+		level_max = level_min + (1-strength) / (1+level_min)
+		pdb.run_procedure('gimp-drawable-levels', [mask, Gimp.HistogramChannel.VALUE, #drawable, channel
+		                                          level_min, level_max, True, 1.0, #input min, max, clamp, gamma
+		                                          0.0, 1.0, False]) #out min, max, clamp
 		# Apply mask
 		halo.remove_mask(Gimp.MaskApplyMode.APPLY)
 		# Crop to content
 		pdb.run_procedure('plug-in-autocrop-layer', [Gimp.RunMode.NONINTERACTIVE, image, halo])
 
-		# Update displays
-		Gimp.displays_flush()
-
 	# Close undo group
 	image.undo_group_end()
+	if errors:
+		Gimp.message('Non-text layers skipped: ' + ', '.join(errors))
 
 	# Boilerplate
-	Gimp.displays_flush()
 	Gimp.context_pop()
+	Gimp.displays_flush()
 	config.end_run(Gimp.PDBStatusType.SUCCESS)
 	return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
 
 # define the plugin
 class TextHaloPlugin (Gimp.PlugIn):
 	# Parameters
-	sigma = GObject.Property(type = float,
-	                         default = 3.0, minimum = 0.0,
-	                         nick = "Halo _size", blurb = "Blur sigma")
-	level_min = GObject.Property(type = float,
-	                             default = 0.0, minimum = 0.0, maximum = 1.0,
-	                             nick = "_Shrink", blurb = "Level minimum")
-	level_gamma = GObject.Property(type = float,
-	                               default = 0.3, minimum = 0.10, maximum = 10.0,
-	                               nick = "_Gamma", blurb = "Level gamma")
-	level_max = GObject.Property(type = float,
-	                             default = 0.3, minimum = 0.0, maximum = 1.0,
-	                             nick = "_Opaque %", blurb = "Level maximum")
+	__gproperties__ = dict()
+	size =     GObject.Property(type = float,
+	                            default = 0.1, minimum = 0.0,
+	                            nick = "_Halo size", blurb = "Blur size / Text size")
+	strength = GObject.Property(type = float,
+	                            default = 1/3, minimum = 0.0, maximum = 1.0,
+	                            nick = "S_trength", blurb = "1 - Input level maximum")
 
 	## GimpPlugIn virtual methods ##
 	def do_set_i18n(self, procname):
@@ -132,7 +137,9 @@ class TextHaloPlugin (Gimp.PlugIn):
 		procedure = Gimp.ImageProcedure.new(self, name,
 		                                    Gimp.PDBProcType.PLUGIN,
 		                                    text_halo, None)
-		procedure.set_sensitivity_mask (Gimp.ProcedureSensitivityMask.NO_IMAGE)
+		procedure.set_image_types("RGB*, GRAY*");
+		procedure.set_sensitivity_mask (Gimp.ProcedureSensitivityMask.DRAWABLE |
+		                                Gimp.ProcedureSensitivityMask.DRAWABLES)
 		procedure.set_documentation ("Text halo", #short
 		                             "Creates a halo effect around text", #long
 		                             name)
@@ -142,10 +149,8 @@ class TextHaloPlugin (Gimp.PlugIn):
 		                          "2023")  #date
 		procedure.add_menu_path ("<Image>/Filters/Light and Shadow")
 
-		procedure.add_argument_from_property(self, "sigma")
-		procedure.add_argument_from_property(self, "level_min")
-		procedure.add_argument_from_property(self, "level_gamma")
-		procedure.add_argument_from_property(self, "level_max")
+		procedure.add_argument_from_property(self, "size")
+		procedure.add_argument_from_property(self, "strength")
 
 		return procedure
 
